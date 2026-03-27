@@ -1,4 +1,8 @@
-require('dotenv').config();
+const path = require('path');
+
+require('dotenv').config({
+  path: path.join(process.cwd(), '.env'), 
+});
 
 const TelegramBot = require('node-telegram-bot-api');
 const Calendar = require('telegram-inline-calendar');
@@ -42,6 +46,21 @@ function getNextHalfHourMinutes() {
     return now.getHours() * 60 + 30;
   }
   return (now.getHours() + 1) * 60;
+}
+
+function getAllDatesInRange(startDateStr, endDateStr) {
+  const start = parseDateDMY(startDateStr);
+  const end = parseDateDMY(endDateStr);
+  const dates = [];
+  const current = new Date(start);
+  while (current <= end) {
+    const d = String(current.getDate()).padStart(2, '0');
+    const m = String(current.getMonth() + 1).padStart(2, '0');
+    const y = current.getFullYear();
+    dates.push(`${d}.${m}.${y}`);
+    current.setDate(current.getDate() + 1);
+  }
+  return dates;
 }
 
 const userStates = {};
@@ -105,7 +124,8 @@ bot.on('callback_query', async (query) => {
     let text = 'Ваши брони:\n\n';
     const keyboard = myBookings.map((b, i) => {
       const itemsNames = b.items.map((id) => products[id] || id).join(', ');
-      text += `${i + 1}. ${b.date} ${b.startTime}–${b.endTime}\n   ${itemsNames}\n\n`;
+      const dateStr = b.startDate && b.endDate ? `${b.startDate} — ${b.endDate}` : b.date;
+      text += `${i + 1}. ${dateStr} ${b.startTime}–${b.endTime}\n   ${itemsNames}\n\n`;
       return [
         {
           text: `🗑 Удалить №${i + 1}`,
@@ -183,12 +203,10 @@ bot.on('callback_query', async (query) => {
       return;
     }
 
-    bot.sendMessage(chatId, 'Если хотите, можно вернуться к выбору товаров:', {
-      reply_markup: {
-        inline_keyboard: [[{ text: '↩️ Назад к товарам', callback_data: 'back:items' }], [{ text: '↩️ В меню', callback_data: 'main_menu' }]],
-      },
+    state.mode = 'booking_select_start_date';
+    bot.sendMessage(chatId, 'Выберите **начало** периода бронирования:', {
+      parse_mode: 'Markdown',
     });
-
     calendar.startNavCalendar(query.message);
     return;
   }
@@ -196,6 +214,103 @@ bot.on('callback_query', async (query) => {
   if (calendar.chats.has(chatId) && messageId === calendar.chats.get(chatId)) {
     const selectedDate = calendar.clickButtonCalendar(query);
     if (selectedDate === -1) {
+      return;
+    }
+
+    if (state.mode === 'booking_select_start_date') {
+      state.startDate = selectedDate;
+      bot.sendMessage(chatId, `Выбрана дата: ${selectedDate}\n\nБронировать на несколько дней?`, {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '✅ Да, несколько дней', callback_data: 'booking_select_multiple' }],
+            [{ text: '❌ Нет, только этот день', callback_data: 'booking_single_day' }],
+          ],
+        },
+      });
+      return;
+    }
+
+    if (state.mode === 'booking_select_end_date') {
+      const startDateObj = parseDateDMY(state.startDate);
+      const endDateObj = parseDateDMY(selectedDate);
+      
+      if (endDateObj < startDateObj) {
+        bot.sendMessage(chatId, '❌ Конец периода не может быть раньше начала. Выберите корректную дату.');
+        calendar.startNavCalendar(query.message);
+        return;
+      }
+
+      state.endDate = selectedDate;
+
+      // Если это мульти-дневная брони (разные даты) - сохранить без выбора времени
+      if (state.startDate !== state.endDate) {
+        const bookings = await loadBookings();
+        
+        const newBooking = {
+          id: uuidv4(),
+          userId,
+          username,
+          startDate: state.startDate,
+          endDate: state.endDate,
+          startTime: '09:00',
+          endTime: '22:00',
+          items: [...state.cart],
+          createdAt: new Date().toISOString(),
+        };
+
+        bookings.push(newBooking);
+        await saveBookings(bookings);
+
+        const itemsNames = state.cart.map((id) => products[id]).join(', ');
+        bot.sendMessage(chatId, `✅ Успешно забронировано!\n\nОборудование: ${itemsNames}\nКогда: ${state.startDate} — ${state.endDate} (полный день 09:00–22:00)`, {
+          reply_markup: {
+            inline_keyboard: [[{ text: '↩️ Главное меню', callback_data: 'main_menu' }]],
+          },
+        });
+
+        delete userStates[chatId];
+        return;
+      }
+
+      // Если это одна дата - показать выбор времени
+      state.mode = 'booking';
+      state.selectedDate = state.startDate;
+
+      const now = new Date();
+      const selectedDateObj2 = parseDateDMY(state.startDate);
+      let startMinute = TIME_START_HOUR * 60;
+
+      if (isSameDay(selectedDateObj2, now)) {
+        const candidate = getNextHalfHourMinutes();
+        if (candidate > startMinute) startMinute = candidate;
+      }
+
+      const timeKeyboard = [];
+      let row = [];
+      for (let m = startMinute; m <= TIME_END_HOUR * 60 - MIN_DURATION_MINUTES; m += 30) {
+        const t = minutesToTime(m);
+        row.push({ text: t, callback_data: `start_time:${t}` });
+        if (row.length === TIME_GRID_COLUMNS) {
+          timeKeyboard.push(row);
+          row = [];
+        }
+      }
+      if (row.length) timeKeyboard.push(row);
+
+      if (timeKeyboard.length === 0) {
+        bot.sendMessage(chatId, 'Для выбранной даты нет доступного времени начала. Пожалуйста, выберите другую дату.');
+        state.mode = 'booking_select_start_date';
+        delete state.startDate;
+        delete state.endDate;
+        return;
+      }
+
+      timeKeyboard.push([{ text: '↩️ К выбору дат', callback_data: 'next:date' }], [{ text: '↩️ В меню', callback_data: 'main_menu' }]);
+
+      bot.sendMessage(chatId, `Дата: ${state.startDate}\n\nВыберите **время начала**:`, {
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: timeKeyboard },
+      });
       return;
     }
 
@@ -222,13 +337,11 @@ bot.on('callback_query', async (query) => {
       return;
     }
 
-    if (state.mode === 'booking') {
+    if (state.mode === 'booking' && state.selectedDate) {
       if (!state.cart || state.cart.length === 0) {
         bot.sendMessage(chatId, 'Сначала выберите оборудование.');
         return;
       }
-
-      state.selectedDate = selectedDate;
 
       const now = new Date();
       const selectedDateObj = parseDateDMY(selectedDate);
@@ -268,7 +381,7 @@ bot.on('callback_query', async (query) => {
   }
 
   if (data.startsWith('start_time:') && state.mode === 'booking') {
-    if (!state.selectedDate) {
+    if (!state.selectedDate && !(state.startDate && state.endDate)) {
       bot.sendMessage(chatId, 'Выберите дату перед временем.');
       return;
     }
@@ -318,39 +431,121 @@ bot.on('callback_query', async (query) => {
     }
 
     const bookings = await loadBookings();
-    const onDate = bookings.filter((b) => b.date === state.selectedDate);
+      let conflict = false;
 
-    const conflict = onDate.some((b) =>
-      intervalsOverlap(startMin, endMin, timeToMinutes(b.startTime), timeToMinutes(b.endTime))
-    );
+      if (state.startDate && state.endDate) {
+        const allDates = getAllDatesInRange(state.startDate, state.endDate);
+        conflict = allDates.some((dateStr) => {
+          const onDate = bookings.filter((b) => (b.startDate && b.endDate) ? 
+            getAllDatesInRange(b.startDate, b.endDate).includes(dateStr) : 
+            b.date === dateStr);
+          return onDate.some((b) =>
+            intervalsOverlap(startMin, endMin, timeToMinutes(b.startTime), timeToMinutes(b.endTime))
+          );
+        });
+      } else if (state.selectedDate) {
+        const onDate = bookings.filter((b) => b.date === state.selectedDate);
+        conflict = onDate.some((b) =>
+          intervalsOverlap(startMin, endMin, timeToMinutes(b.startTime), timeToMinutes(b.endTime))
+        );
+      }
 
-    if (conflict) {
-      bot.sendMessage(chatId, `❌ Время ${state.startTime}–${endTime} пересекается с другой бронью.`);
+      if (conflict) {
+        bot.sendMessage(chatId, `❌ Время ${state.startTime}–${endTime} пересекается с другой бронью.`);
+        return;
+      }
+
+      const newBooking = {
+        id: uuidv4(),
+        userId,
+        username,
+        startTime: state.startTime,
+        endTime,
+        items: [...state.cart],
+        createdAt: new Date().toISOString(),
+      };
+
+      if (state.startDate && state.endDate) {
+        newBooking.startDate = state.startDate;
+        newBooking.endDate = state.endDate;
+      } else {
+        newBooking.date = state.selectedDate;
+      }
+
+      bookings.push(newBooking);
+      await saveBookings(bookings);
+
+      const itemsNames = state.cart.map((id) => products[id]).join(', ');
+      const dateDisplay = (state.startDate && state.endDate) ? 
+        `${state.startDate} — ${state.endDate}` : 
+        state.selectedDate;
+      bot.sendMessage(chatId, `✅ Успешно забронировано!\n\nОборудование: ${itemsNames}\nКогда: ${dateDisplay} ${state.startTime} – ${endTime}`, {
+        reply_markup: {
+          inline_keyboard: [[{ text: '↩️ Главное меню', callback_data: 'main_menu' }]],
+        },
+      });
+
+      delete userStates[chatId];
       return;
     }
 
-    const newBooking = {
-      id: uuidv4(),
-      userId,
-      username,
-      date: state.selectedDate,
-      startTime: state.startTime,
-      endTime,
-      items: [...state.cart],
-      createdAt: new Date().toISOString(),
-    };
-
-    bookings.push(newBooking);
-    await saveBookings(bookings);
-
-    const itemsNames = state.cart.map((id) => products[id]).join(', ');
-    bot.sendMessage(chatId, `✅ Успешно забронировано!\n\nОборудование: ${itemsNames}\nКогда: ${state.selectedDate} ${state.startTime} – ${endTime}`, {
-      reply_markup: {
-        inline_keyboard: [[{ text: '↩️ Главное меню', callback_data: 'main_menu' }]],
-      },
+  if (data === 'booking_select_multiple') {
+    if (!state.startDate) {
+      bot.sendMessage(chatId, 'Выберите дату начала сначала.');
+      return;
+    }
+    state.mode = 'booking_select_end_date';
+    bot.sendMessage(chatId, 'Теперь выберите **конец** периода бронирования:', {
+      parse_mode: 'Markdown',
     });
+    calendar.startNavCalendar(query.message);
+    return;
+  }
 
-    delete userStates[chatId];
+  if (data === 'booking_single_day') {
+    if (!state.startDate) {
+      bot.sendMessage(chatId, 'Выберите дату сначала.');
+      return;
+    }
+    state.endDate = state.startDate;
+    state.mode = 'booking';
+    state.selectedDate = state.startDate;
+
+    const now = new Date();
+    const selectedDateObj = parseDateDMY(state.startDate);
+    let startMinute = TIME_START_HOUR * 60;
+
+    if (isSameDay(selectedDateObj, now)) {
+      const candidate = getNextHalfHourMinutes();
+      if (candidate > startMinute) startMinute = candidate;
+    }
+
+    const timeKeyboard = [];
+    let row = [];
+    for (let m = startMinute; m <= TIME_END_HOUR * 60 - MIN_DURATION_MINUTES; m += 30) {
+      const t = minutesToTime(m);
+      row.push({ text: t, callback_data: `start_time:${t}` });
+      if (row.length === TIME_GRID_COLUMNS) {
+        timeKeyboard.push(row);
+        row = [];
+      }
+    }
+    if (row.length) timeKeyboard.push(row);
+
+    if (timeKeyboard.length === 0) {
+      bot.sendMessage(chatId, 'Для выбранной даты нет доступного времени начала. Пожалуйста, выберите другую дату.');
+      state.mode = 'booking_select_start_date';
+      delete state.startDate;
+      delete state.endDate;
+      return;
+    }
+
+    timeKeyboard.push([{ text: '↩️ К выбору дат', callback_data: 'next:date' }], [{ text: '↩️ В меню', callback_data: 'main_menu' }]);
+
+    bot.sendMessage(chatId, `Дата: ${state.startDate}\n\nВыберите **время начала**:`, {
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: timeKeyboard },
+    });
     return;
   }
 
@@ -359,14 +554,10 @@ bot.on('callback_query', async (query) => {
     const bookings = await loadBookings();
     const booking = bookings.find((b) => b.id === bookingId);
 
-    if (!booking || booking.userId !== userId) {
-      bot.sendMessage(chatId, 'Эта бронь не найдена или не ваша.');
-      return;
-    }
-
     const itemsNames = booking.items.map((id) => products[id] || id).join(', ');
+    const dateDisplay = booking.startDate && booking.endDate ? `${booking.startDate} — ${booking.endDate}` : booking.date;
 
-    bot.editMessageText(`Удалить бронь?\n\n${booking.date} ${booking.startTime}–${booking.endTime}\n${itemsNames}`, {
+    bot.editMessageText(`Удалить бронь?\n\n${dateDisplay} ${booking.startTime}–${booking.endTime}\n${itemsNames}`, {
       chat_id: chatId,
       message_id: messageId,
       reply_markup: {
@@ -393,7 +584,8 @@ bot.on('callback_query', async (query) => {
     bookings.splice(idx, 1);
     await saveBookings(bookings);
 
-    bot.editMessageText(`Бронь удалена:\n\n${booking.date} ${booking.startTime}–${booking.endTime}\n${booking.items.map((id) => products[id] || id).join(', ')}`, {
+    const dateDisplay = booking.startDate && booking.endDate ? `${booking.startDate} — ${booking.endDate}` : booking.date;
+    bot.editMessageText(`Бронь удалена:\n\n${dateDisplay} ${booking.startTime}–${booking.endTime}\n${booking.items.map((id) => products[id] || id).join(', ')}`, {
       chat_id: chatId,
       message_id: messageId,
       reply_markup: {
