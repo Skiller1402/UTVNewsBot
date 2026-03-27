@@ -6,4 +6,5 @@ yarn-debug.log*
 yarn-error.log*
 coverage/
 logs/
+bookings.json
 *.log
