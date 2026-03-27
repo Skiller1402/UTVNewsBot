@@ -10,6 +10,12 @@ const { v4: uuidv4 } = require('uuid');
 const { loadBookings, saveBookings } = require('./storage');
 const { timeToMinutes, minutesToTime, intervalsOverlap } = require('./timeUtils');
 
+// 
+
+const { createBooking } = require('./createBooking');
+
+// 
+
 const TOKEN = process.env.BOT_TOKEN;
 if (!TOKEN) {
   console.error('BOT_TOKEN не установлен. Создайте .env с BOT_TOKEN=...');
@@ -29,6 +35,13 @@ const calendar = new Calendar(bot, {
   start_date: new Date(),
   time_selector_mod: false,
 });
+
+// 
+
+createBooking()
+
+// 
+
 
 function parseDateDMY(dateStr) {
   const [d, m, y] = dateStr.split('.').map(Number);
