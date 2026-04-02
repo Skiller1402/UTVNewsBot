@@ -6,7 +6,23 @@ require('dotenv').config({
 
 const TelegramBot = require('node-telegram-bot-api');
 const Calendar = require('telegram-inline-calendar');
-const { v4: uuidv4 } = require('uuid');
+
+let uuidv4;
+try {
+  const uuid = require('uuid');
+  uuidv4 = uuid.v4 || (uuid.default && uuid.default.v4);
+} catch (err) {
+  console.warn('[uuid] модуль не найден, будет использован crypto.randomUUID();', err.message);
+}
+if (!uuidv4) {
+  try {
+    const { randomUUID } = require('crypto');
+    uuidv4 = () => randomUUID();
+  } catch (err) {
+    throw new Error('Невозможно инициализировать uuid. Установите uuid@8 или обновите Node.js (>=14.17).');
+  }
+}
+
 const { loadBookings, saveBookings } = require('./storage');
 const { timeToMinutes, minutesToTime, intervalsOverlap } = require('./timeUtils');
 
