@@ -76,6 +76,27 @@ function getAllDatesInRange(startDateStr, endDateStr) {
   return dates;
 }
 
+function bookingMatchesDate(booking, dateStr) {
+  if (booking.startDate && booking.endDate) {
+    return getAllDatesInRange(booking.startDate, booking.endDate).includes(dateStr);
+  }
+  return booking.date === dateStr;
+}
+
+function bookingHasSharedItems(booking, items) {
+  return booking.items.some((item) => items.includes(item));
+}
+
+function isBookingConflict(booking, dateStr, startMin, endMin, items) {
+  if (!bookingMatchesDate(booking, dateStr)) {
+    return false;
+  }
+  if (!bookingHasSharedItems(booking, items)) {
+    return false;
+  }
+  return intervalsOverlap(startMin, endMin, timeToMinutes(booking.startTime), timeToMinutes(booking.endTime));
+}
+
 const userStates = {};
 
 const products = {
@@ -91,7 +112,7 @@ function showMainMenu(chatId) {
       inline_keyboard: [
         [{ text: '📅 Забронировать оборудование', callback_data: 'start_booking' }],
         [{ text: '📋 Мои брони', callback_data: 'my_bookings' }],
-        [{ text: '🔍 Брони на день', callback_data: 'view_by_date' }],
+        [{ text: '🔍 Все брони', callback_data: 'view_by_date' }],
       ],
     },
   });
@@ -113,6 +134,7 @@ bot.on('callback_query', async (query) => {
   userStates[chatId] = state;
 
   if (data === 'start_booking') {
+    console.log('[booking] start_booking', { chatId, userId, username });
     userStates[chatId] = { mode: 'booking', cart: [] };
     const keyboard = Object.entries(products).map(([key, name]) => [{ text: name, callback_data: `add:${key}` }]);
     keyboard.push([{ text: '➡️ Далее — дата и время', callback_data: 'next:date' }]);
@@ -126,6 +148,7 @@ bot.on('callback_query', async (query) => {
   }
 
   if (data === 'my_bookings') {
+    console.log('[booking] my_bookings requested', { chatId, userId, username });
     const bookings = await loadBookings();
     const myBookings = bookings.filter((b) => b.userId === userId);
 
@@ -157,6 +180,7 @@ bot.on('callback_query', async (query) => {
   }
 
   if (data === 'view_by_date') {
+    console.log('[booking] view_by_date started', { chatId, userId, username });
     userStates[chatId] = { mode: 'view_date' };
     bot.sendMessage(chatId, 'Выберите дату для просмотра броней:');
     calendar.startNavCalendar(query.message);
@@ -184,6 +208,7 @@ bot.on('callback_query', async (query) => {
 
   if (data.startsWith('add:') && state.mode === 'booking') {
     const key = data.slice(4);
+    console.log('[booking] add/remove item', { chatId, userId, key, currentCart: state.cart });
     if (state.cart.includes(key)) {
       state.cart = state.cart.filter((k) => k !== key);
     } else {
@@ -211,6 +236,7 @@ bot.on('callback_query', async (query) => {
   }
 
   if (data === 'next:date' && state.mode === 'booking') {
+    console.log('[booking] next:date', { chatId, userId, cart: state.cart });
     if (!state.cart || state.cart.length === 0) {
       bot.sendMessage(chatId, 'Выберите хотя бы один товар!');
       return;
@@ -244,7 +270,7 @@ bot.on('callback_query', async (query) => {
     }
 
     if (state.mode === 'booking_select_end_date') {
-      const startDateObj = parseDateDMY(state.startDate);
+      console.log('[booking] selected end date', { chatId, userId, startDate: state.startDate, endDate: selectedDate });
       const endDateObj = parseDateDMY(selectedDate);
       
       if (endDateObj < startDateObj) {
@@ -258,7 +284,19 @@ bot.on('callback_query', async (query) => {
       // Если это мульти-дневная брони (разные даты) - сохранить без выбора времени
       if (state.startDate !== state.endDate) {
         const bookings = await loadBookings();
-        
+
+        const allDates = getAllDatesInRange(state.startDate, state.endDate);
+        const startMin = timeToMinutes('09:00');
+        const endMin = timeToMinutes('22:00');
+        const conflict = allDates.some((date) =>
+          bookings.some((b) => isBookingConflict(b, date, startMin, endMin, state.cart))
+        );
+
+        if (conflict) {
+          bot.sendMessage(chatId, '❌ Конфликт: выбранные позиции уже зарезервированы на часть периода. Выберите другой диапазон или другой товар.');
+          return;
+        }
+
         const newBooking = {
           id: uuidv4(),
           userId,
@@ -329,7 +367,7 @@ bot.on('callback_query', async (query) => {
 
     if (state.mode === 'view_date') {
       const bookings = await loadBookings();
-      const onDate = bookings.filter((b) => b.date === selectedDate);
+      const onDate = bookings.filter((b) => bookingMatchesDate(b, selectedDate));
 
       if (onDate.length === 0) {
         bot.sendMessage(chatId, `На ${selectedDate} броней нет.`, {
@@ -339,7 +377,8 @@ bot.on('callback_query', async (query) => {
         let txt = `Брони на ${selectedDate}:\n\n`;
         onDate.forEach((b, i) => {
           const who = b.username ? `@${b.username}` : `ID ${b.userId}`;
-          txt += `${i + 1}. ${b.startTime}–${b.endTime} — ${b.items.map((id) => products[id] || id).join(', ')} (${who})\n`;
+          const dateExp = b.startDate && b.endDate ? `${b.startDate} — ${b.endDate}` : b.date || selectedDate;
+          txt += `${i + 1}. ${dateExp} ${b.startTime}–${b.endTime} — ${b.items.map((id) => products[id] || id).join(', ')} (${who})\n`;
         });
         bot.sendMessage(chatId, txt, {
           reply_markup: { inline_keyboard: [[{ text: '↩️ Главное меню', callback_data: 'main_menu' }]] },
@@ -448,23 +487,16 @@ bot.on('callback_query', async (query) => {
 
       if (state.startDate && state.endDate) {
         const allDates = getAllDatesInRange(state.startDate, state.endDate);
-        conflict = allDates.some((dateStr) => {
-          const onDate = bookings.filter((b) => (b.startDate && b.endDate) ? 
-            getAllDatesInRange(b.startDate, b.endDate).includes(dateStr) : 
-            b.date === dateStr);
-          return onDate.some((b) =>
-            intervalsOverlap(startMin, endMin, timeToMinutes(b.startTime), timeToMinutes(b.endTime))
-          );
-        });
-      } else if (state.selectedDate) {
-        const onDate = bookings.filter((b) => b.date === state.selectedDate);
-        conflict = onDate.some((b) =>
-          intervalsOverlap(startMin, endMin, timeToMinutes(b.startTime), timeToMinutes(b.endTime))
+        conflict = allDates.some((dateStr) =>
+          bookings.some((b) => isBookingConflict(b, dateStr, startMin, endMin, state.cart))
         );
+      } else if (state.selectedDate) {
+        conflict = bookings.some((b) => isBookingConflict(b, state.selectedDate, startMin, endMin, state.cart));
       }
 
       if (conflict) {
-        bot.sendMessage(chatId, `❌ Время ${state.startTime}–${endTime} пересекается с другой бронью.`);
+        console.log('[booking] time conflict', { chatId, userId, date: state.selectedDate || state.startDate, startTime: state.startTime, endTime, items: state.cart });
+        bot.sendMessage(chatId, `❌ Время ${state.startTime}–${endTime} пересекается с другой бронью той же позиции.`);
         return;
       }
 
@@ -487,6 +519,7 @@ bot.on('callback_query', async (query) => {
 
       bookings.push(newBooking);
       await saveBookings(bookings);
+      console.log('[booking] saved', { chatId, userId, booking: newBooking });
 
       const itemsNames = state.cart.map((id) => products[id]).join(', ');
       const dateDisplay = (state.startDate && state.endDate) ? 
