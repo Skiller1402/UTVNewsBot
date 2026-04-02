@@ -271,6 +271,7 @@ bot.on('callback_query', async (query) => {
 
     if (state.mode === 'booking_select_end_date') {
       console.log('[booking] selected end date', { chatId, userId, startDate: state.startDate, endDate: selectedDate });
+      const startDateObj = parseDateDMY(state.startDate);
       const endDateObj = parseDateDMY(selectedDate);
       
       if (endDateObj < startDateObj) {
