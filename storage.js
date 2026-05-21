@@ -11,32 +11,52 @@ function withLock(action) {
   return next;
 }
 
-async function loadBookings() {
-  return withLock(() => {
-    try {
-      if (fs.existsSync(BOOKINGS_FILE)) {
-        const text = fs.readFileSync(BOOKINGS_FILE, 'utf8');
-        if (!text.trim()) return [];
-        return JSON.parse(text);
-      }
-    } catch (e) {
-      console.error('Ошибка чтения bookings.json:', e);
-    }
+function readBookingsFile() {
+  if (!fs.existsSync(BOOKINGS_FILE)) {
     return [];
-  });
+  }
+
+  const text = fs.readFileSync(BOOKINGS_FILE, 'utf8');
+  if (!text.trim()) {
+    return [];
+  }
+
+  const bookings = JSON.parse(text);
+  if (!Array.isArray(bookings)) {
+    throw new Error('bookings.json должен содержать массив броней');
+  }
+  return bookings;
+}
+
+function writeBookingsFile(bookings) {
+  if (!Array.isArray(bookings)) {
+    throw new Error('saveBookings ожидает массив броней');
+  }
+
+  const tempFile = `${BOOKINGS_FILE}.tmp`;
+  fs.writeFileSync(tempFile, JSON.stringify(bookings, null, 2), 'utf8');
+  fs.renameSync(tempFile, BOOKINGS_FILE);
+}
+
+async function loadBookings() {
+  return withLock(readBookingsFile);
 }
 
 async function saveBookings(bookings) {
+  return withLock(() => writeBookingsFile(bookings));
+}
+
+async function updateBookings(updater) {
   return withLock(() => {
-    try {
-      fs.writeFileSync(BOOKINGS_FILE, JSON.stringify(bookings, null, 2), 'utf8');
-    } catch (e) {
-      console.error('Ошибка записи bookings.json:', e);
-    }
+    const bookings = readBookingsFile();
+    const result = updater(bookings);
+    writeBookingsFile(bookings);
+    return result;
   });
 }
 
 module.exports = {
   loadBookings,
-  saveBookings
+  saveBookings,
+  updateBookings
 };

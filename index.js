@@ -23,8 +23,15 @@ if (!uuidv4) {
   }
 }
 
-const { loadBookings, saveBookings } = require('./storage');
-const { timeToMinutes, minutesToTime, intervalsOverlap } = require('./timeUtils');
+const { loadBookings, updateBookings } = require('./storage');
+const { timeToMinutes, minutesToTime } = require('./timeUtils');
+const {
+  appendBookingIfAvailable,
+  bookingMatchesDate,
+  createBookingDraft,
+  deleteBookingById,
+  parseDateDMY,
+} = require('./bookingService');
 
 // 
 
@@ -39,6 +46,32 @@ if (!TOKEN) {
 }
 
 const bot = new TelegramBot(TOKEN, { polling: true });
+
+bot.on('polling_error', (error) => {
+  console.error('[telegram] polling_error:', error && (error.stack || error.message || error));
+});
+
+bot.on('webhook_error', (error) => {
+  console.error('[telegram] webhook_error:', error && (error.stack || error.message || error));
+});
+
+bot.on('error', (error) => {
+  console.error('[telegram] error:', error && (error.stack || error.message || error));
+});
+
+function wrapTelegramMethod(methodName) {
+  const originalMethod = bot[methodName].bind(bot);
+  bot[methodName] = (...args) => originalMethod(...args).catch((error) => {
+    console.error(`[telegram] ${methodName} failed:`, error && (error.stack || error.message || error));
+    return null;
+  });
+}
+
+[
+  'sendMessage',
+  'editMessageText',
+  'editMessageReplyMarkup',
+].forEach(wrapTelegramMethod);
 
 const MIN_DURATION_MINUTES = 30;
 const TIME_GRID_COLUMNS = 5;
@@ -59,11 +92,6 @@ createBooking()
 // 
 
 
-function parseDateDMY(dateStr) {
-  const [d, m, y] = dateStr.split('.').map(Number);
-  return new Date(y, m - 1, d);
-}
-
 function isSameDay(a, b) {
   return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 }
@@ -77,48 +105,13 @@ function getNextHalfHourMinutes() {
   return (now.getHours() + 1) * 60;
 }
 
-function getAllDatesInRange(startDateStr, endDateStr) {
-  const start = parseDateDMY(startDateStr);
-  const end = parseDateDMY(endDateStr);
-  const dates = [];
-  const current = new Date(start);
-  while (current <= end) {
-    const d = String(current.getDate()).padStart(2, '0');
-    const m = String(current.getMonth() + 1).padStart(2, '0');
-    const y = current.getFullYear();
-    dates.push(`${d}.${m}.${y}`);
-    current.setDate(current.getDate() + 1);
-  }
-  return dates;
-}
-
-function bookingMatchesDate(booking, dateStr) {
-  if (booking.startDate && booking.endDate) {
-    return getAllDatesInRange(booking.startDate, booking.endDate).includes(dateStr);
-  }
-  return booking.date === dateStr;
-}
-
-function bookingHasSharedItems(booking, items) {
-  return booking.items.some((item) => items.includes(item));
-}
-
-function isBookingConflict(booking, dateStr, startMin, endMin, items) {
-  if (!bookingMatchesDate(booking, dateStr)) {
-    return false;
-  }
-  if (!bookingHasSharedItems(booking, items)) {
-    return false;
-  }
-  return intervalsOverlap(startMin, endMin, timeToMinutes(booking.startTime), timeToMinutes(booking.endTime));
-}
-
 const userStates = {};
 
 const products = {
   iphone15: 'iPhone 15 Pro Max',
   iphone16: 'iPhone 16 Pro Max',
   djimic: 'DJI Mic 2',
+  djimicmini: 'DJI Mic Mini',
   light: 'Накамерный свет',
 };
 
@@ -137,14 +130,79 @@ function showMainMenu(chatId) {
 bot.onText(/\/start/, (msg) => showMainMenu(msg.chat.id));
 bot.onText(/\/book/, (msg) => showMainMenu(msg.chat.id));
 
-bot.on('callback_query', async (query) => {
+process.on('unhandledRejection', (reason) => {
+  console.error('[process] unhandledRejection:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('[process] uncaughtException:', error);
+});
+
+let isShuttingDown = false;
+
+async function shutdown(signal) {
+  if (isShuttingDown) {
+    return;
+  }
+
+  isShuttingDown = true;
+  console.log(`[process] ${signal} received, stopping bot polling...`);
+
+  try {
+    await bot.stopPolling();
+    console.log('[process] bot polling stopped');
+    process.exit(0);
+  } catch (error) {
+    console.error('[process] failed to stop bot polling:', error);
+    process.exit(1);
+  }
+}
+
+process.once('SIGINT', () => shutdown('SIGINT'));
+process.once('SIGTERM', () => shutdown('SIGTERM'));
+
+async function notifyCallbackFailure(query, error) {
+  const chatId = query && query.message && query.message.chat && query.message.chat.id;
+  console.error('[telegram] callback_query failed:', {
+    data: query && query.data,
+    chatId,
+    error: error && (error.stack || error.message || error),
+  });
+
+  if (query && query.id) {
+    try {
+      await bot.answerCallbackQuery(query.id, {
+        text: 'Произошла ошибка. Попробуйте еще раз.',
+        show_alert: false,
+      });
+    } catch (answerError) {
+      console.warn('[telegram] answerCallbackQuery failed after error:', answerError.message);
+    }
+  }
+
+  if (chatId) {
+    try {
+      await bot.sendMessage(chatId, 'Произошла внутренняя ошибка. Попробуйте еще раз или вернитесь в меню через /start.');
+    } catch (sendError) {
+      console.warn('[telegram] failed to send error message:', sendError.message);
+    }
+  }
+}
+
+bot.on('callback_query', (query) => {
+  handleCallbackQuery(query).catch((error) => notifyCallbackFailure(query, error));
+});
+
+async function handleCallbackQuery(query) {
   const chatId = query.message.chat.id;
   const messageId = query.message.message_id;
   const data = query.data;
   const userId = query.from.id;
   const username = query.from.username || null;
 
-  await bot.answerCallbackQuery(query.id);
+  await bot.answerCallbackQuery(query.id).catch((error) => {
+    console.warn('[telegram] answerCallbackQuery failed:', error.message);
+  });
 
   const state = userStates[chatId] || {};
   userStates[chatId] = state;
@@ -300,21 +358,7 @@ bot.on('callback_query', async (query) => {
 
       // Если это мульти-дневная брони (разные даты) - сохранить без выбора времени
       if (state.startDate !== state.endDate) {
-        const bookings = await loadBookings();
-
-        const allDates = getAllDatesInRange(state.startDate, state.endDate);
-        const startMin = timeToMinutes('09:00');
-        const endMin = timeToMinutes('22:00');
-        const conflict = allDates.some((date) =>
-          bookings.some((b) => isBookingConflict(b, date, startMin, endMin, state.cart))
-        );
-
-        if (conflict) {
-          bot.sendMessage(chatId, '❌ Конфликт: выбранные позиции уже зарезервированы на часть периода. Выберите другой диапазон или другой товар.');
-          return;
-        }
-
-        const newBooking = {
+        const bookingDraft = createBookingDraft({
           id: uuidv4(),
           userId,
           username,
@@ -322,12 +366,14 @@ bot.on('callback_query', async (query) => {
           endDate: state.endDate,
           startTime: '09:00',
           endTime: '22:00',
-          items: [...state.cart],
-          createdAt: new Date().toISOString(),
-        };
+          items: state.cart,
+        });
+        const bookingResult = await updateBookings((bookings) => appendBookingIfAvailable(bookings, bookingDraft));
 
-        bookings.push(newBooking);
-        await saveBookings(bookings);
+        if (bookingResult.conflict) {
+          bot.sendMessage(chatId, '❌ Конфликт: выбранные позиции уже зарезервированы на часть периода. Выберите другой диапазон или другой товар.');
+          return;
+        }
 
         const itemsNames = state.cart.map((id) => products[id]).join(', ');
         bot.sendMessage(chatId, `✅ Успешно забронировано!\n\nОборудование: ${itemsNames}\nКогда: ${state.startDate} — ${state.endDate} (полный день 09:00–22:00)`, {
@@ -499,58 +545,41 @@ bot.on('callback_query', async (query) => {
       return;
     }
 
-    const bookings = await loadBookings();
-      let conflict = false;
+    const bookingDraft = createBookingDraft({
+      id: uuidv4(),
+      userId,
+      username,
+      startTime: state.startTime,
+      endTime,
+      items: state.cart,
+      startDate: state.startDate,
+      endDate: state.endDate,
+      date: state.selectedDate,
+    });
+    const bookingResult = await updateBookings((bookings) => appendBookingIfAvailable(bookings, bookingDraft));
 
-      if (state.startDate && state.endDate) {
-        const allDates = getAllDatesInRange(state.startDate, state.endDate);
-        conflict = allDates.some((dateStr) =>
-          bookings.some((b) => isBookingConflict(b, dateStr, startMin, endMin, state.cart))
-        );
-      } else if (state.selectedDate) {
-        conflict = bookings.some((b) => isBookingConflict(b, state.selectedDate, startMin, endMin, state.cart));
-      }
-
-      if (conflict) {
-        console.log('[booking] time conflict', { chatId, userId, date: state.selectedDate || state.startDate, startTime: state.startTime, endTime, items: state.cart });
-        bot.sendMessage(chatId, `❌ Время ${state.startTime}–${endTime} пересекается с другой бронью той же позиции.`);
-        return;
-      }
-
-      const newBooking = {
-        id: uuidv4(),
-        userId,
-        username,
-        startTime: state.startTime,
-        endTime,
-        items: [...state.cart],
-        createdAt: new Date().toISOString(),
-      };
-
-      if (state.startDate && state.endDate) {
-        newBooking.startDate = state.startDate;
-        newBooking.endDate = state.endDate;
-      } else {
-        newBooking.date = state.selectedDate;
-      }
-
-      bookings.push(newBooking);
-      await saveBookings(bookings);
-      console.log('[booking] saved', { chatId, userId, booking: newBooking });
-
-      const itemsNames = state.cart.map((id) => products[id]).join(', ');
-      const dateDisplay = (state.startDate && state.endDate) ? 
-        `${state.startDate} — ${state.endDate}` : 
-        state.selectedDate;
-      bot.sendMessage(chatId, `✅ Успешно забронировано!\n\nОборудование: ${itemsNames}\nКогда: ${dateDisplay} ${state.startTime} – ${endTime}`, {
-        reply_markup: {
-          inline_keyboard: [[{ text: '↩️ Главное меню', callback_data: 'main_menu' }]],
-        },
-      });
-
-      delete userStates[chatId];
+    if (bookingResult.conflict) {
+      console.log('[booking] time conflict', { chatId, userId, date: state.selectedDate || state.startDate, startTime: state.startTime, endTime, items: state.cart });
+      bot.sendMessage(chatId, `❌ Время ${state.startTime}–${endTime} пересекается с другой бронью той же позиции.`);
       return;
     }
+
+    const newBooking = bookingResult.booking;
+    console.log('[booking] saved', { chatId, userId, booking: newBooking });
+
+    const itemsNames = state.cart.map((id) => products[id]).join(', ');
+    const dateDisplay = (state.startDate && state.endDate) ?
+      `${state.startDate} — ${state.endDate}` :
+      state.selectedDate;
+    bot.sendMessage(chatId, `✅ Успешно забронировано!\n\nОборудование: ${itemsNames}\nКогда: ${dateDisplay} ${state.startTime} – ${endTime}`, {
+      reply_markup: {
+        inline_keyboard: [[{ text: '↩️ Главное меню', callback_data: 'main_menu' }]],
+      },
+    });
+
+    delete userStates[chatId];
+    return;
+  }
 
   if (data === 'booking_select_multiple') {
     if (!state.startDate) {
@@ -617,6 +646,11 @@ bot.on('callback_query', async (query) => {
     const bookings = await loadBookings();
     const booking = bookings.find((b) => b.id === bookingId);
 
+    if (!booking) {
+      bot.sendMessage(chatId, 'Бронь уже удалена или не найдена.');
+      return;
+    }
+
     const itemsNames = booking.items.map((id) => products[id] || id).join(', ');
     const dateDisplay = booking.startDate && booking.endDate ? `${booking.startDate} — ${booking.endDate}` : booking.date;
 
@@ -635,17 +669,14 @@ bot.on('callback_query', async (query) => {
 
   if (data.startsWith('delete_final:')) {
     const bookingId = data.split(':')[1];
-    const bookings = await loadBookings();
-    const idx = bookings.findIndex((b) => b.id === bookingId);
+    const deleteResult = await updateBookings((bookings) => deleteBookingById(bookings, bookingId, userId));
 
-    if (idx === -1 || bookings[idx].userId !== userId) {
+    if (!deleteResult.deleted) {
       bot.sendMessage(chatId, 'Ошибка удаления: бронь не найдена или не принадлежит вам.');
       return;
     }
 
-    const booking = bookings[idx];
-    bookings.splice(idx, 1);
-    await saveBookings(bookings);
+    const booking = deleteResult.booking;
 
     const dateDisplay = booking.startDate && booking.endDate ? `${booking.startDate} — ${booking.endDate}` : booking.date;
     bot.editMessageText(`Бронь удалена:\n\n${dateDisplay} ${booking.startTime}–${booking.endTime}\n${booking.items.map((id) => products[id] || id).join(', ')}`, {
@@ -677,6 +708,6 @@ bot.on('callback_query', async (query) => {
   }
 
   bot.sendMessage(chatId, 'Команда не распознана. /start для меню.');
-});
+}
 
 console.log('Бот запущен...');
