@@ -7,7 +7,6 @@ require('dotenv').config({
 const TelegramBot = require('node-telegram-bot-api');
 const Calendar = require('telegram-inline-calendar');
 const calendarLang = require('telegram-inline-calendar/src/language.json');
-const { SocksProxyAgent } = require('socks-proxy-agent');
 
 let uuidv4;
 try {
@@ -48,6 +47,8 @@ if (!TOKEN) {
 }
 
 const TELEGRAM_PROXY_URL = process.env.TELEGRAM_SOCKS_PROXY_URL || process.env.SOCKS_PROXY_URL || process.env.ALL_PROXY;
+let bot;
+let calendar;
 
 function maskProxyUrl(proxyUrl) {
   try {
@@ -64,7 +65,7 @@ function maskProxyUrl(proxyUrl) {
   }
 }
 
-function createBotOptions() {
+async function createBotOptions() {
   const options = {
     polling: true,
     request: {
@@ -73,26 +74,13 @@ function createBotOptions() {
   };
 
   if (TELEGRAM_PROXY_URL) {
+    const { SocksProxyAgent } = await import('socks-proxy-agent');
     options.request.agent = new SocksProxyAgent(TELEGRAM_PROXY_URL);
     console.log(`[telegram] SOCKS proxy enabled: ${maskProxyUrl(TELEGRAM_PROXY_URL)}`);
   }
 
   return options;
 }
-
-const bot = new TelegramBot(TOKEN, createBotOptions());
-
-bot.on('polling_error', (error) => {
-  console.error('[telegram] polling_error:', error && (error.stack || error.message || error));
-});
-
-bot.on('webhook_error', (error) => {
-  console.error('[telegram] webhook_error:', error && (error.stack || error.message || error));
-});
-
-bot.on('error', (error) => {
-  console.error('[telegram] error:', error && (error.stack || error.message || error));
-});
 
 function logTelegramMethodError(methodName, error) {
   console.error(`[telegram] ${methodName} failed:`, error && (error.stack || error.message || error));
@@ -153,21 +141,6 @@ const TIME_GRID_COLUMNS = 5;
 const TIME_START_HOUR = 9;
 const TIME_END_HOUR = 22;
 
-const calendar = new Calendar(bot, {
-  date_format: 'DD.MM.YYYY',
-  language: 'ru',
-  start_date: new Date(),
-  time_selector_mod: false,
-});
-patchCalendarErrorHandling(calendar);
-
-// 
-
-createBooking()
-
-// 
-
-
 function isSameDay(a, b) {
   return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 }
@@ -203,9 +176,6 @@ function showMainMenu(chatId) {
   });
 }
 
-bot.onText(/\/start/, (msg) => showMainMenu(msg.chat.id));
-bot.onText(/\/book/, (msg) => showMainMenu(msg.chat.id));
-
 process.on('unhandledRejection', (reason) => {
   console.error('[process] unhandledRejection:', reason);
 });
@@ -223,6 +193,10 @@ async function shutdown(signal) {
 
   isShuttingDown = true;
   console.log(`[process] ${signal} received, stopping bot polling...`);
+
+  if (!bot) {
+    process.exit(0);
+  }
 
   try {
     await bot.stopPolling();
@@ -264,10 +238,6 @@ async function notifyCallbackFailure(query, error) {
     }
   }
 }
-
-bot.on('callback_query', (query) => {
-  handleCallbackQuery(query).catch((error) => notifyCallbackFailure(query, error));
-});
 
 async function handleCallbackQuery(query) {
   const chatId = query.message.chat.id;
@@ -786,4 +756,44 @@ async function handleCallbackQuery(query) {
   sendMessage(chatId, 'Команда не распознана. /start для меню.');
 }
 
-console.log('Бот запущен...');
+function attachBotErrorHandlers() {
+  bot.on('polling_error', (error) => {
+    console.error('[telegram] polling_error:', error && (error.stack || error.message || error));
+  });
+
+  bot.on('webhook_error', (error) => {
+    console.error('[telegram] webhook_error:', error && (error.stack || error.message || error));
+  });
+
+  bot.on('error', (error) => {
+    console.error('[telegram] error:', error && (error.stack || error.message || error));
+  });
+}
+
+async function start() {
+  bot = new TelegramBot(TOKEN, await createBotOptions());
+  attachBotErrorHandlers();
+
+  calendar = new Calendar(bot, {
+    date_format: 'DD.MM.YYYY',
+    language: 'ru',
+    start_date: new Date(),
+    time_selector_mod: false,
+  });
+  patchCalendarErrorHandling(calendar);
+
+  await createBooking();
+
+  bot.onText(/\/start/, (msg) => showMainMenu(msg.chat.id));
+  bot.onText(/\/book/, (msg) => showMainMenu(msg.chat.id));
+  bot.on('callback_query', (query) => {
+    handleCallbackQuery(query).catch((error) => notifyCallbackFailure(query, error));
+  });
+
+  console.log('Бот запущен...');
+}
+
+start().catch((error) => {
+  console.error('[process] failed to start bot:', error && (error.stack || error.message || error));
+  process.exit(1);
+});
