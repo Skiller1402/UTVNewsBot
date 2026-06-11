@@ -65,6 +65,7 @@ function createBookingDraft({
   id,
   userId,
   username,
+  title,
   startTime,
   endTime,
   items,
@@ -77,6 +78,7 @@ function createBookingDraft({
     id,
     userId,
     username,
+    title: normalizeBookingTitle(title),
     startTime,
     endTime,
     items: [...items],
@@ -91,6 +93,13 @@ function createBookingDraft({
   }
 
   return booking;
+}
+
+function normalizeBookingTitle(title) {
+  if (typeof title !== 'string') {
+    return '';
+  }
+  return title.trim().replace(/\s+/g, ' ').slice(0, 120);
 }
 
 function appendBookingIfAvailable(bookings, booking) {
@@ -122,5 +131,6 @@ module.exports = {
   getAllDatesInRange,
   hasBookingConflict,
   isBookingConflict,
+  normalizeBookingTitle,
   parseDateDMY,
 };

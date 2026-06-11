@@ -5,6 +5,7 @@ const {
   deleteBookingById,
   getAllDatesInRange,
   hasBookingConflict,
+  normalizeBookingTitle,
 } = require('../bookingService');
 
 function booking(overrides = {}) {
@@ -93,6 +94,7 @@ test('createBookingDraft copies items and creates single-day or period bookings'
     id: 'new',
     userId: 1,
     username: 'user',
+    title: '  Утренний   выпуск  ',
     date: '21.05.2026',
     startTime: '10:00',
     endTime: '11:00',
@@ -105,6 +107,7 @@ test('createBookingDraft copies items and creates single-day or period bookings'
   expect(singleDayBooking).toMatchObject({
     id: 'new',
     date: '21.05.2026',
+    title: 'Утренний выпуск',
     items: ['iphone15'],
   });
   expect(singleDayBooking.startDate).toBeUndefined();
@@ -127,6 +130,14 @@ test('createBookingDraft copies items and creates single-day or period bookings'
     endDate: '22.05.2026',
   });
   expect(periodBooking.date).toBeUndefined();
+});
+
+test('normalizeBookingTitle trims, collapses spaces, and limits length', () => {
+  const longTitle = `  ${'Очень '.repeat(40)}длинное название  `;
+
+  expect(normalizeBookingTitle('  Съемка    интервью  ')).toBe('Съемка интервью');
+  expect(normalizeBookingTitle(longTitle)).toHaveLength(120);
+  expect(normalizeBookingTitle(null)).toBe('');
 });
 
 test('deleteBookingById removes only own bookings', () => {
