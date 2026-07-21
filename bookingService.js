@@ -23,6 +23,10 @@ function getAllDatesInRange(startDateStr, endDateStr) {
 }
 
 function bookingMatchesDate(booking, dateStr) {
+  if (!isActiveBooking(booking)) {
+    return false;
+  }
+
   if (booking.startDate && booking.endDate) {
     return getAllDatesInRange(booking.startDate, booking.endDate).includes(dateStr);
   }
@@ -57,7 +61,7 @@ function hasBookingConflict(bookings, booking) {
   const startMin = timeToMinutes(booking.startTime);
   const endMin = timeToMinutes(booking.endTime);
   return getBookingDates(booking).some((dateStr) =>
-    bookings.some((existing) => isBookingConflict(existing, dateStr, startMin, endMin, booking.items))
+    bookings.some((existing) => isActiveBooking(existing) && isBookingConflict(existing, dateStr, startMin, endMin, booking.items))
   );
 }
 
@@ -66,6 +70,7 @@ function createBookingDraft({
   userId,
   username,
   title,
+  note,
   startTime,
   endTime,
   items,
@@ -79,6 +84,8 @@ function createBookingDraft({
     userId,
     username,
     title: normalizeBookingTitle(title),
+    note: normalizeBookingNote(note),
+    status: 'active',
     startTime,
     endTime,
     items: [...items],
@@ -102,6 +109,51 @@ function normalizeBookingTitle(title) {
   return title.trim().replace(/\s+/g, ' ').slice(0, 120);
 }
 
+function normalizeBookingNote(note) {
+  if (typeof note !== 'string') {
+    return '';
+  }
+  return note.trim().replace(/\s+/g, ' ').slice(0, 300);
+}
+
+function getBookingDateLabel(booking) {
+  return booking.startDate && booking.endDate ? `${booking.startDate} — ${booking.endDate}` : booking.date;
+}
+
+function getBookingStartDate(booking) {
+  return booking.startDate || booking.date;
+}
+
+function getBookingStartDateTime(booking) {
+  const date = getBookingStartDate(booking);
+  if (!date || !booking.startTime) {
+    return null;
+  }
+
+  const [day, month, year] = date.split('.').map(Number);
+  const [hours, minutes] = booking.startTime.split(':').map(Number);
+  return new Date(year, month - 1, day, hours, minutes, 0, 0);
+}
+
+function sortBookingsByStart(bookings) {
+  return [...bookings].sort((a, b) => {
+    const aTime = getBookingStartDateTime(a);
+    const bTime = getBookingStartDateTime(b);
+    return (aTime ? aTime.getTime() : 0) - (bTime ? bTime.getTime() : 0);
+  });
+}
+
+function getActiveBookings(bookings) {
+  return bookings.filter(isActiveBooking);
+}
+
+function isBookingInDateRange(booking, startDate, endDate) {
+  return getBookingDates(booking).some((dateStr) => {
+    const date = parseDateDMY(dateStr);
+    return date >= startDate && date <= endDate;
+  });
+}
+
 function appendBookingIfAvailable(bookings, booking) {
   if (hasBookingConflict(bookings, booking)) {
     return { conflict: true };
@@ -111,15 +163,22 @@ function appendBookingIfAvailable(bookings, booking) {
   return { conflict: false, booking };
 }
 
-function deleteBookingById(bookings, bookingId, userId) {
+function isActiveBooking(booking) {
+  return Boolean(booking) && booking.status !== 'deleted' && !booking.deletedAt;
+}
+
+function deleteBookingById(bookings, bookingId, userId, options = {}) {
+  const { deletedAt = new Date().toISOString() } = options;
   const idx = bookings.findIndex((booking) => booking.id === bookingId);
 
-  if (idx === -1 || bookings[idx].userId !== userId) {
+  if (idx === -1 || bookings[idx].userId !== userId || !isActiveBooking(bookings[idx])) {
     return { deleted: false };
   }
 
   const booking = bookings[idx];
-  bookings.splice(idx, 1);
+  booking.status = 'deleted';
+  booking.deletedAt = deletedAt;
+  booking.deletedBy = userId;
   return { deleted: true, booking };
 }
 
@@ -129,8 +188,15 @@ module.exports = {
   createBookingDraft,
   deleteBookingById,
   getAllDatesInRange,
+  getActiveBookings,
+  getBookingDateLabel,
+  getBookingStartDateTime,
   hasBookingConflict,
+  isActiveBooking,
+  isBookingInDateRange,
   isBookingConflict,
+  normalizeBookingNote,
   normalizeBookingTitle,
   parseDateDMY,
+  sortBookingsByStart,
 };

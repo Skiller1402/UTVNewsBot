@@ -5,6 +5,8 @@ const {
   deleteBookingById,
   getAllDatesInRange,
   hasBookingConflict,
+  isActiveBooking,
+  normalizeBookingNote,
   normalizeBookingTitle,
 } = require('../bookingService');
 
@@ -64,6 +66,20 @@ test('hasBookingConflict checks date, time, and shared equipment', () => {
   }))).toBe(false);
 });
 
+test('hasBookingConflict ignores deleted bookings', () => {
+  const bookings = [booking({
+    status: 'deleted',
+    deletedAt: '2026-05-21T09:00:00.000Z',
+    deletedBy: 1,
+  })];
+
+  expect(hasBookingConflict(bookings, booking({
+    id: 'same-item-overlap',
+    startTime: '10:30',
+    endTime: '11:30',
+  }))).toBe(false);
+});
+
 test('appendBookingIfAvailable mutates only when there is no conflict', () => {
   const bookings = [booking()];
   const conflictingBooking = booking({
@@ -95,6 +111,7 @@ test('createBookingDraft copies items and creates single-day or period bookings'
     userId: 1,
     username: 'user',
     title: '  Утренний   выпуск  ',
+    note: '  Студия   2  ',
     date: '21.05.2026',
     startTime: '10:00',
     endTime: '11:00',
@@ -107,7 +124,9 @@ test('createBookingDraft copies items and creates single-day or period bookings'
   expect(singleDayBooking).toMatchObject({
     id: 'new',
     date: '21.05.2026',
+    status: 'active',
     title: 'Утренний выпуск',
+    note: 'Студия 2',
     items: ['iphone15'],
   });
   expect(singleDayBooking.startDate).toBeUndefined();
@@ -140,7 +159,15 @@ test('normalizeBookingTitle trims, collapses spaces, and limits length', () => {
   expect(normalizeBookingTitle(null)).toBe('');
 });
 
-test('deleteBookingById removes only own bookings', () => {
+test('normalizeBookingNote trims, collapses spaces, and limits length', () => {
+  const longNote = `  ${'Подробность '.repeat(40)}конец  `;
+
+  expect(normalizeBookingNote('  Павильон    3  ')).toBe('Павильон 3');
+  expect(normalizeBookingNote(longNote)).toHaveLength(300);
+  expect(normalizeBookingNote(null)).toBe('');
+});
+
+test('deleteBookingById marks only own active bookings as deleted', () => {
   const bookings = [
     booking({ id: 'own', userId: 1 }),
     booking({ id: 'other', userId: 2 }),
@@ -149,9 +176,15 @@ test('deleteBookingById removes only own bookings', () => {
   expect(deleteBookingById(bookings, 'other', 1)).toEqual({ deleted: false });
   expect(bookings).toHaveLength(2);
 
-  const result = deleteBookingById(bookings, 'own', 1);
+  const result = deleteBookingById(bookings, 'own', 1, { deletedAt: '2026-05-21T09:00:00.000Z' });
 
   expect(result.deleted).toBe(true);
   expect(result.booking.id).toBe('own');
-  expect(bookings.map((item) => item.id)).toEqual(['other']);
+  expect(result.booking).toMatchObject({
+    status: 'deleted',
+    deletedAt: '2026-05-21T09:00:00.000Z',
+    deletedBy: 1,
+  });
+  expect(bookings).toHaveLength(2);
+  expect(isActiveBooking(result.booking)).toBe(false);
 });

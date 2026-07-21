@@ -7,4 +7,5 @@ yarn-error.log*
 coverage/
 logs/
 bookings.json
+backups/
 *.log
