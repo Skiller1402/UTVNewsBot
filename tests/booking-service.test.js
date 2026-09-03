@@ -4,6 +4,7 @@ const {
   createBookingDraft,
   deleteBookingById,
   getAllDatesInRange,
+  getDueReminder,
   hasBookingConflict,
   isActiveBooking,
   normalizeBookingNote,
@@ -187,4 +188,64 @@ test('deleteBookingById marks only own active bookings as deleted', () => {
   });
   expect(bookings).toHaveLength(2);
   expect(isActiveBooking(result.booking)).toBe(false);
+});
+
+test('getDueReminder picks only the closest unsent reminder', () => {
+  const now = new Date(2026, 4, 21, 9, 30);
+
+  expect(getDueReminder(booking({
+    date: '21.05.2026',
+    startTime: '10:00',
+  }), now)).toEqual({ key: 'hour', label: '1 час' });
+
+  expect(getDueReminder(booking({
+    date: '22.05.2026',
+    startTime: '9:30',
+  }), now)).toEqual({ key: 'day', label: '24 часа' });
+
+  expect(getDueReminder(booking({
+    date: '21.05.2026',
+    startTime: '10:00',
+    reminders: { hour: '2026-05-21T08:30:00.000Z' },
+  }), now)).toBeNull();
+});
+
+test('getDueReminder sends hourly reminder even when daily reminder was sent', () => {
+  const now = new Date(2026, 4, 21, 9, 30);
+
+  expect(getDueReminder(booking({
+    date: '21.05.2026',
+    startTime: '10:00',
+    reminders: { day: '2026-05-20T10:00:00.000Z' },
+  }), now)).toEqual({ key: 'hour', label: '1 час' });
+});
+
+test('getDueReminder does not repeat daily reminder', () => {
+  const now = new Date(2026, 4, 20, 12, 0);
+
+  expect(getDueReminder(booking({
+    date: '21.05.2026',
+    startTime: '10:00',
+    reminders: { day: '2026-05-20T10:00:00.000Z' },
+  }), now)).toBeNull();
+});
+
+test('getDueReminder ignores bookings that already started', () => {
+  const now = new Date(2026, 4, 21, 10, 0);
+
+  expect(getDueReminder(booking({
+    date: '21.05.2026',
+    startTime: '10:00',
+  }), now)).toBeNull();
+});
+
+test('getDueReminder uses start date for multi-day bookings', () => {
+  const now = new Date(2026, 4, 20, 9, 0);
+
+  expect(getDueReminder(booking({
+    date: undefined,
+    startDate: '21.05.2026',
+    endDate: '23.05.2026',
+    startTime: '09:00',
+  }), now)).toEqual({ key: 'day', label: '24 часа' });
 });

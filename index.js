@@ -34,7 +34,7 @@ const {
   deleteBookingById,
   getActiveBookings,
   getBookingDateLabel,
-  getBookingStartDateTime,
+  getDueReminder,
   isActiveBooking,
   isBookingInDateRange,
   isBookingConflict,
@@ -548,26 +548,14 @@ async function checkBookingReminders() {
     const due = [];
 
     bookings.filter(isActiveBooking).forEach((booking) => {
-      const startDateTime = getBookingStartDateTime(booking);
-      if (!startDateTime) {
-        return;
-      }
-
-      const msUntilStart = startDateTime.getTime() - now.getTime();
-      if (msUntilStart <= 0) {
+      const reminder = getDueReminder(booking, now);
+      if (!reminder) {
         return;
       }
 
       booking.reminders = booking.reminders || {};
-      [
-        { key: 'day', label: 'через 24 часа', ms: 24 * 60 * 60 * 1000 },
-        { key: 'hour', label: 'через 1 час', ms: 60 * 60 * 1000 },
-      ].forEach((reminder) => {
-        if (!booking.reminders[reminder.key] && msUntilStart <= reminder.ms) {
-          booking.reminders[reminder.key] = new Date().toISOString();
-          due.push({ booking: { ...booking, items: [...booking.items] }, label: reminder.label });
-        }
-      });
+      booking.reminders[reminder.key] = new Date().toISOString();
+      due.push({ booking: { ...booking, items: [...booking.items] }, label: reminder.label });
     });
 
     return due;
@@ -576,7 +564,7 @@ async function checkBookingReminders() {
   await Promise.all(dueReminders.map(({ booking, label }) => {
     const itemsNames = booking.items.map((id) => products[id] || id).join(', ');
     return sendMessage(booking.userId, [
-      `Напоминание: съемка ${label}`,
+      `Напоминание: до съемки осталось ${label}`,
       `${getBookingDateLabel(booking)} ${booking.startTime}–${booking.endTime}`,
       `${formatBookingTitleLine(booking)}${formatBookingNoteLine(booking)}${itemsNames}`,
     ].join('\n'), {

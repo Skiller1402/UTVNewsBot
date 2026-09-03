@@ -135,6 +135,28 @@ function getBookingStartDateTime(booking) {
   return new Date(year, month - 1, day, hours, minutes, 0, 0);
 }
 
+function getDueReminder(booking, now = new Date()) {
+  const startDateTime = getBookingStartDateTime(booking);
+  if (!startDateTime) {
+    return null;
+  }
+
+  const msUntilStart = startDateTime.getTime() - now.getTime();
+  if (msUntilStart <= 0) {
+    return null;
+  }
+
+  const reminders = booking.reminders || {};
+  if (msUntilStart <= 60 * 60 * 1000) {
+    return reminders.hour ? null : { key: 'hour', label: '1 час' };
+  }
+  if (msUntilStart <= 24 * 60 * 60 * 1000) {
+    return reminders.day ? null : { key: 'day', label: '24 часа' };
+  }
+
+  return null;
+}
+
 function sortBookingsByStart(bookings) {
   return [...bookings].sort((a, b) => {
     const aTime = getBookingStartDateTime(a);
@@ -190,6 +212,7 @@ module.exports = {
   getAllDatesInRange,
   getActiveBookings,
   getBookingDateLabel,
+  getDueReminder,
   getBookingStartDateTime,
   hasBookingConflict,
   isActiveBooking,
