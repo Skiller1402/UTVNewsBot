@@ -25,7 +25,7 @@ Telegram-бот для бронирования съемочной техник�
 
 - iPhone 15 Pro Max
 - iPhone 16 Pro Max
-- iPhone 17 Pro
+- iPhone 17 Pro Max
 - DJI Mic 2
 - DJI Mic Mini
 - Накамерный свет
