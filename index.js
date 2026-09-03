@@ -5,6 +5,8 @@ require('dotenv').config({
   path: path.join(process.cwd(), '.env'),
 });
 
+process.env.TZ = process.env.BOOKING_TIME_ZONE || 'Asia/Yekaterinburg';
+
 const TelegramBot = require('node-telegram-bot-api');
 const Calendar = require('telegram-inline-calendar');
 const calendarLang = require('telegram-inline-calendar/src/language.json');

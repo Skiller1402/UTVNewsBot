@@ -51,7 +51,10 @@ npm install
 
 ```env
 BOT_TOKEN=your_telegram_bot_token
+BOOKING_TIME_ZONE=Asia/Yekaterinburg
 ```
+
+`BOOKING_TIME_ZONE` задает часовой пояс бронирований и напоминаний. Если переменная не указана, бот использует `Asia/Yekaterinburg`.
 
 Если Telegram API доступен только через SOCKS proxy, добавьте:
 
