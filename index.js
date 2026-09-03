@@ -120,6 +120,14 @@ function sendMessage(...args) {
   });
 }
 
+async function sendLongMessage(chatId, text, options = {}) {
+  const chunks = text.match(/[\s\S]{1,3500}/g) || [''];
+
+  for (const [index, chunk] of chunks.entries()) {
+    await sendMessage(chatId, chunk, index === chunks.length - 1 ? options : {});
+  }
+}
+
 function editMessageText(...args) {
   return bot.editMessageText(...args).catch((error) => {
     logTelegramMethodError('editMessageText', error);
@@ -411,7 +419,7 @@ async function handleWeekCommand(msg) {
     .filter((booking) => booking.userId === msg.from.id)
     .filter((booking) => isBookingInDateRange(booking, today, end)));
 
-  sendMessage(chatId, formatBookingsList('Ваши активные брони на ближайшие 7 дней:', bookings), {
+  await sendLongMessage(chatId, formatBookingsList('Ваши активные брони на ближайшие 7 дней:', bookings), {
     reply_markup: mainMenuOnlyKeyboard(),
   });
 }
@@ -439,7 +447,7 @@ async function handleSearchCommand(msg, match) {
     return haystack.includes(query);
   }));
 
-  sendMessage(chatId, formatBookingsList(`Результаты поиска: ${query}`, bookings), {
+  await sendLongMessage(chatId, formatBookingsList(`Результаты поиска: ${query}`, bookings), {
     reply_markup: mainMenuOnlyKeyboard(),
   });
 }
@@ -636,6 +644,13 @@ async function migrateBookings() {
 }
 
 async function handleCallbackQuery(query) {
+  if (!query.message || !query.message.chat) {
+    await bot.answerCallbackQuery(query.id).catch((error) => {
+      console.warn('[telegram] answerCallbackQuery failed:', error.message);
+    });
+    return;
+  }
+
   const chatId = query.message.chat.id;
   const messageId = query.message.message_id;
   const data = query.data;
@@ -676,7 +691,7 @@ async function handleCallbackQuery(query) {
       text += `${formatBookingLine(b, i)}\n\n`;
     });
 
-    sendMessage(chatId, text, {
+    await sendLongMessage(chatId, text, {
       reply_markup: myBookingsKeyboard(myBookings),
     });
 
@@ -801,7 +816,7 @@ async function handleCallbackQuery(query) {
           reply_markup: mainMenuOnlyKeyboard(),
         });
       } else {
-        sendMessage(chatId, formatBookingsList(`Брони на ${selectedDate}:`, onDate), {
+        await sendLongMessage(chatId, formatBookingsList(`Брони на ${selectedDate}:`, onDate), {
           reply_markup: mainMenuOnlyKeyboard(),
         });
       }
@@ -1172,7 +1187,7 @@ async function start() {
   calendar = new Calendar(bot, {
     date_format: 'DD.MM.YYYY',
     language: 'ru',
-    start_date: new Date(),
+    start_date: false,
     time_selector_mod: false,
   });
   patchCalendarErrorHandling(calendar);
